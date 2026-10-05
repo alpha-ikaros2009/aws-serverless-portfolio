@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>作品集 · AWS Serverless 雲端架構</title>
+<meta name="description" content="以 AWS 免費額度打造的 Serverless 作品集:S3 + CloudFront + API Gateway + Lambda + DynamoDB + SQS,Terraform 與 GitHub Actions OIDC 全自動部署。">
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --ok: #3fb950;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC",
+      "Microsoft JhengHei", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.7; max-width: 880px; margin: 0 auto; padding: 0 20px 80px;
+  }
+  header { padding: 72px 0 40px; }
+  h1 { font-size: 2.2rem; letter-spacing: .02em; }
+  h1 .accent { color: var(--accent); }
+  .tagline { color: var(--muted); margin-top: 12px; max-width: 620px; }
+  h2 {
+    font-size: 1.05rem; color: var(--accent); text-transform: uppercase;
+    letter-spacing: .12em; margin: 48px 0 16px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 22px 24px;
+  }
+  .stack { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 16px; }
+  .stack div { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: .9rem; }
+  .stack b { display: block; color: var(--accent); font-size: .8rem; letter-spacing: .06em; margin-bottom: 2px; }
+  .counter { font-size: 3rem; font-weight: 700; color: var(--ok); font-variant-numeric: tabular-nums; }
+  .counter-note { color: var(--muted); font-size: .85rem; }
+  form label { display: block; margin: 14px 0 4px; font-size: .9rem; color: var(--muted); }
+  input, textarea {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font: inherit;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { min-height: 110px; resize: vertical; }
+  button {
+    margin-top: 18px; background: var(--accent); color: #04121f;
+    border: 0; border-radius: 8px; padding: 11px 22px;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.12); }
+  #form-status { margin-top: 12px; font-size: .9rem; color: var(--muted); }
+  footer { margin-top: 64px; color: var(--muted); font-size: .82rem; border-top: 1px solid var(--border); padding-top: 20px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>作品集<span class="accent">.</span> AWS Serverless<br>雲端架構參考實作</h1>
+  <p class="tagline">
+    從 <b>$0/月免費額度</b> 起步、可直接演進至多帳戶多區域企業級的 serverless 架構:
+    Terraform module 化、GitHub Actions OIDC 無金鑰部署、單表設計 DynamoDB、非同步 SQS 解耦。
+  </p>
+</header>
+
+<section>
+  <h2>架構總覽</h2>
+  <div class="card">
+    <p>
+      CloudFront (OAC) → S3 靜態網站;<code>/api/*</code> → API Gateway HTTP API →
+      Lambda(python3.13 / arm64)→ DynamoDB 單表設計;聯絡表單走 SQS → worker Lambda 非同步寫入,
+      失敗進 DLQ。全链路 CloudWatch + X-Ray 觀測,成本由 Budgets 三階告警與異常偵測把關。
+    </p>
+    <!-- 架構圖在 repo 中: diagrams/phase1-freetier.png(部署到 S3 的靜態站不含該檔,
+         完整圖請見 GitHub 倉庫 README)。 -->
+    <div class="stack">
+      <div><b>FRONTEND</b>S3 + CloudFront (OAC, PriceClass 100)</div>
+      <div><b>API</b>API Gateway HTTP API + JWT Authorizer (Cognito)</div>
+      <div><b>COMPUTE</b>Lambda ×2(python3.13, arm64, 128 MB)</div>
+      <div><b>DATA</b>DynamoDB on-demand 單表設計(PK/SK + GSI1)</div>
+      <div><b>ASYNC</b>SQS + DLQ(maxReceiveCount 3)</div>
+      <div><b>CI/CD</b>GitHub Actions + OIDC,無長期金鑰</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>即時數據</h2>
+  <div class="card">
+    <div class="counter" id="visitor-count">—</div>
+    <p class="counter-note" id="visitor-note">
+      累計訪客數(每次載入由 GET /visitors 原子性 +1,寫入 DynamoDB)
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2>聯絡我</h2>
+  <div class="card">
+    <form id="contact-form">
+      <label for="name">姓名</label>
+      <input id="name" name="name" required maxlength="100">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required maxlength="200">
+      <label for="message">訊息</label>
+      <textarea id="message" name="message" required maxlength="2000"></textarea>
+      <button type="submit">送出(經 SQS 非同步處理)</button>
+    </form>
+    <p id="form-status"></p>
+  </div>
+</section>
+
+<footer>
+  Infrastructure as Code(Terraform)· CI/CD(GitHub Actions OIDC)·
+  設計文件與 ADR 見倉庫 <code>docs/</code>。
+</footer>
+
+<script src="config.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // config.js placeholder 未被部署流程替換時,退回同源 /api;
+  // 若 API 尚未部署,頁面優雅降級,不影響閱覽。
+  var configured = window.API_BASE_URL;
+  var base = (configured && configured.indexOf("__") !== 0)
+    ? configured.replace(/\/+$/, "")
+    : location.origin + "/api";
+
+  var countEl = document.getElementById("visitor-count");
+  var noteEl = document.getElementById("visitor-note");
+
+  fetch(base + "/visitors", { method: "GET" })
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (data) { countEl.textContent = data.count.toLocaleString(); })
+    .catch(function () {
+      countEl.textContent = "—";
+      noteEl.textContent = "API 尚未部署或暫時無法連線;架構詳情請見倉庫文件。";
+    });
+
+  var form = document.getElementById("contact-form");
+  var status = document.getElementById("form-status");
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    status.textContent = "送出中…";
+    fetch(base + "/contact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: form.name.value,
+        email: form.email.value,
+        message: form.message.value
+      })
+    })
+      .then(function (r) {
+        if (r.status === 202) {
+          status.textContent = "已送出,感謝您的訊息!";
+          form.reset();
+        } else {
+          return r.json().then(function (b) {
+            status.textContent = "送出失敗:" + (b.error || r.status);
+          });
+        }
+      })
+      .catch(function () { status.textContent = "目前無法連線,請稍後再試。"; });
+  });
+})();
+</script>
+
+</body>
+</html>

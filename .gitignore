@@ -1,0 +1,10 @@
+.tools/
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+__pycache__/
+*.tfvars
+!*.tfvars.example
+build/
+plan.txt

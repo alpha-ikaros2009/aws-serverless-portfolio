@@ -1,0 +1,191 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "services/**"
+      - "web/**"
+  workflow_dispatch:
+
+# OIDC only — no AWS access keys are stored in GitHub (ADR-0003).
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE || 'terraform-state-locks' }}
+
+jobs:
+  plan:
+    name: terraform plan (dev)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        working-directory: infra/envs/dev
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+
+      - name: terraform plan
+        id: plan
+        working-directory: infra/envs/dev
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color 2>&1 | tee plan.txt
+
+      # Plan output lands on the run's Summary page. On pull_request events
+      # (e.g. if this workflow is later also triggered on PRs) it is posted as
+      # a PR comment instead.
+      - name: publish plan to step summary
+        if: always()
+        working-directory: infra/envs/dev
+        run: |
+          {
+            echo "### terraform plan (dev) — exit ${{ steps.plan.outcome }}"
+            echo '```'
+            tail -c 60000 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('infra/envs/dev/plan.txt', 'utf8').slice(-60000);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `### terraform plan (dev)\n\`\`\`\n${plan}\n\`\`\``
+            });
+
+  deploy-dev:
+    name: deploy dev
+    needs: plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Packaging for traceability. Terraform's archive_file data source does
+      # the real zipping at plan/apply time from the same source dirs, so the
+      # Lambda code deployed always matches the commit.
+      - name: package lambdas
+        run: |
+          mkdir -p build
+          (cd services/api && zip -r ../../build/api.zip . -x 'test_handler.py' -x '__pycache__/*')
+          (cd services/worker && zip -r ../../build/worker.zip . -x 'test_handler.py' -x '__pycache__/*')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-packages-dev
+          path: build/*.zip
+          retention-days: 7
+
+      - name: terraform init + apply
+        working-directory: infra/envs/dev
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+          terraform apply -input=false -auto-approve -no-color
+
+      - name: publish frontend
+        working-directory: infra/envs/dev
+        run: |
+          CLOUDFRONT_DOMAIN=$(terraform output -raw cloudfront_domain_name)
+          SITE_BUCKET=$(terraform output -raw site_bucket_name)
+          DISTRIBUTION_ID=$(terraform output -raw cloudfront_distribution_id)
+
+          # Inject the runtime API base URL into the config placeholder.
+          sed -i "s|__API_BASE_URL__|https://${CLOUDFRONT_DOMAIN}/api|" ../../../web/config.js
+
+          aws s3 sync ../../../web/ "s3://${SITE_BUCKET}/" --delete
+          aws cloudfront create-invalidation --distribution-id "${DISTRIBUTION_ID}" --paths '/*'
+
+  deploy-prod:
+    name: deploy prod
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    # GitHub environment "prod" — configure required reviewers in the repo
+    # settings so production deploys need manual approval.
+    environment: prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: package lambdas
+        run: |
+          mkdir -p build
+          (cd services/api && zip -r ../../build/api.zip . -x 'test_handler.py' -x '__pycache__/*')
+          (cd services/worker && zip -r ../../build/worker.zip . -x 'test_handler.py' -x '__pycache__/*')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-packages-prod
+          path: build/*.zip
+          retention-days: 7
+
+      - name: terraform init + apply
+        working-directory: infra/envs/prod
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+          terraform apply -input=false -auto-approve -no-color
+
+      - name: publish frontend
+        working-directory: infra/envs/prod
+        run: |
+          CLOUDFRONT_DOMAIN=$(terraform output -raw cloudfront_domain_name)
+          SITE_BUCKET=$(terraform output -raw site_bucket_name)
+          DISTRIBUTION_ID=$(terraform output -raw cloudfront_distribution_id)
+
+          sed -i "s|__API_BASE_URL__|https://${CLOUDFRONT_DOMAIN}/api|" ../../../web/config.js
+
+          aws s3 sync ../../../web/ "s3://${SITE_BUCKET}/" --delete
+          aws cloudfront create-invalidation --distribution-id "${DISTRIBUTION_ID}" --paths '/*'

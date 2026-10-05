@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and fill in real values (never commit real tfvars
+# with personal data — add it to .gitignore if you keep one locally).
+
+project     = "portfolio"
+env         = "dev"
+aws_region  = "ap-northeast-1"
+
+# Foundation (account-level, create once per account)
+create_foundation = true
+alert_email       = "you@example.com"
+github_repo       = "your-github-user/serverless-portfolio"
+
+# From the one-time state-backend bootstrap (see infra/README.md)
+state_bucket_name     = "portfolio-tfstate-<your-account-id>"
+state_lock_table_name = "terraform-state-locks"
+
+# App
+enable_pitr          = false
+cors_allowed_origins = ["*"]

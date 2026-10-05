@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars and fill in real values.
+
+project    = "portfolio"
+env        = "prod"
+aws_region = "ap-northeast-1"
+
+# Single-account setup: foundation already exists from dev, keep this false.
+# (Multi-account Phase 3: set true in the prod account instead.)
+create_foundation = false
+
+# From the one-time state-backend bootstrap (see infra/README.md)
+state_bucket_name     = "portfolio-tfstate-<your-account-id>"
+state_lock_table_name = "terraform-state-locks"
+
+# App — prod hardening
+enable_pitr = true
+# Tighten once the CloudFront domain (or Phase 2 custom domain) is known:
+cors_allowed_origins = ["*"]
